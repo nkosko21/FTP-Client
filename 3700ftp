@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+import os
+from urllib.parse import urlparse
+import socket
+import sys
+
+
+# the TCP socket used to connect to the FTP server
+global control_socket
+
+# the socket used for sending data
+global data_socket
+data_socket = None
+
+
+# Login to the FTP server as the specified username.
+def user(username):
+    global control_socket
+
+    if username == "":
+        username = "anonymous"
+
+    control_socket.send(("USER " + username + "\r\n").encode())
+
+    print(control_socket.recv(1024).decode())
+
+
+# asks the server to close the connection
+def quit():
+    global control_socket
+
+    control_socket.send("QUIT\r\n".encode())
+
+    print(control_socket.recv(1024).decode())
+    control_socket.close()
+
+    if data_socket:
+        data_socket.close()
+
+
+# Login to the FTP server using the specified password
+def passw(password):
+    global control_socket
+
+    control_socket.send(("PASS " + password + "\r\n").encode())
+
+    print(control_socket.recv(1024).decode())
+
+
+# Set the connection to 8-bit binary data mode
+def type(con):
+    global control_socket
+
+    control_socket.send(("TYPE " + con + "\r\n").encode())
+    print(control_socket.recv(1024).decode())
+
+
+# Set the connection to stream mode
+def mode(con):
+    global control_socket
+
+    control_socket.send(("MODE " + con + "\r\n").encode())
+    print(control_socket.recv(1024).decode())
+
+
+# Set the connection to file-oriented mode
+def stru(con):
+    global control_socket
+
+    control_socket.send(("STRU " + con + "\r\n").encode())
+    print(control_socket.recv(1024).decode())
+
+
+# Make a directory at the given path on the FTP server
+def mkd(path):
+    global control_socket
+
+    control_socket.send(("MKD " + path + "\r\n").encode())
+    print(control_socket.recv(1024).decode())
+
+
+# Delete the directory at the given path on the FTP server
+def rmd(path):
+    global control_socket
+
+    control_socket.send(("RMD " + path + "\r\n").encode())
+    print(control_socket.recv(1024).decode())
+
+
+# asks the server to open a data channel
+# returns the IP and Port in a length 2 array
+def pasv():
+    global control_socket
+    global data_socket
+
+    control_socket.sendall("PASV\r\n".encode())
+
+    message = control_socket.recv(1024).decode()  # 22
+
+    print(message)
+
+    message = message[27:len(message) - 4]
+    message = message.split(",")
+    message = [int(numeric_string) for numeric_string in message]
+
+    ip = str(str(message[0]) + "." + str(message[1]) + "." + str(message[2]) + "." + str(message[3]))
+    # convert the port into 8-bit binary
+    port = (message[4] << 8) + message[5]
+    return [ip, port]
+
+
+# List the contents of the given directory on the FTP server
+def list(path):
+    global control_socket
+    global data_socket
+
+    ip_port = pasv()
+    data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    data_socket.connect((ip_port[0], ip_port[1]))
+
+    control_socket.send(("LIST " + path + "\r\n").encode())
+    # confirmation message
+    print(control_socket.recv(1024).decode())
+    # data message
+    print(receive_data(data_socket))
+    data_socket.close()
+
+
+# Upload a new file with the given path and name to the FTP server
+def stor(path):
+    global control_socket
+    global data_socket
+
+    control_socket.send(("STOR " + path + "\r\n").encode())
+    print(control_socket.recv(1024).decode())
+
+
+# Download a file with the given path and name from the FTP server.
+# returns the received file
+def retr(path):
+    global control_socket
+    global data_socket
+
+    ip_port = pasv()
+    data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    data_socket.connect((ip_port[0], ip_port[1]))
+
+    control_socket.send(("RETR " + path + "\r\n").encode())
+    print(control_socket.recv(1024).decode())
+    # the received file
+    msg = receive_data(data_socket)
+    data_socket.close()
+    return msg
+
+
+def receive_data(data_channel):
+    end = False
+    msg = b''
+    while not end:
+        msg = data_channel.recv(4096)
+
+        if not data_channel.recv(4096):
+            end = True
+    return msg
+
+
+# Delete the given file on the FTP server
+def dele(path):
+    global control_socket
+
+    control_socket.send(("DELE " + path + "\r\n").encode())
+    print(control_socket.recv(1024).decode())
+
+
+# Copy the file given by arg1 to the file given by ARG2. If arg1 is a local file,
+# then arg2 must be a URL, and vice-versa.
+def cp(arg1, arg2):
+    if arg1[0:3] == "ftp":
+        login_info = urlparse(arg1)
+        login(login_info.username, login_info.password, login_info.hostname, login_info.port)
+
+        # get the file from the server
+        data = retr(login_info.path)
+        
+        print(len(data))
+
+        # delete the file on the local side
+        if os.path.exists(arg2):
+            os.unlink(arg2)
+
+        # create the new file
+        file = open(arg2, "wb")
+        file.write(data)
+        file.close()
+    else:
+        login_info = urlparse(arg2)
+        login(login_info.username, login_info.password, login_info.hostname, login_info.port)
+
+        file = open(arg1, "rb")
+        data = file.read()
+
+        name = arg1.split("/")
+        name = name[len(name) - 1]
+
+        dele(login_info.path)
+
+        send_data(data, login_info.path, name)
+
+
+# Move the file given by arg1 to the file given by arg2.
+# If arg1 is a local file, then arg2 must be a URL, and vice-versa.
+def mv(arg1, arg2):
+    global data_socket
+
+    if arg1[0:3] == "ftp":
+        path = get_path(arg2)
+
+        login_info = urlparse(arg1)
+        login(login_info.username, login_info.password, login_info.hostname, login_info.port)
+
+        # get the file from the server
+        data = retr(login_info.path)
+
+        # delete the file on the FTP server
+        dele(login_info.path[1:len(login_info.path)])
+        # delete the file on the local side
+        if get_path(arg2):
+            os.unlink(arg2)
+        path = path + login_info.path[1:len(path) - 1]
+        # create the new file
+        file = open(path, "a")
+        file.write(str(data))
+        file.close()
+
+    else:
+        name = arg1.split("/")
+        name = name[len(name) - 1]
+
+        login_info = urlparse(arg2)
+        login(login_info.username, login_info.password, login_info.hostname, login_info.port)
+
+        file = open(arg1, "rb")
+        data = file.read()
+
+        dele(login_info.path)
+
+        send_data(data, login_info.path, name)
+
+        os.unlink(arg1)
+
+
+def get_path(file_path):
+    path = file_path
+    name = file_path.split("/")
+    name = name[len(name) - 1]
+    path = path[0:len(path) - len(name)]
+
+    return path
+
+
+# sends the given data through the given data channel
+def send_data(data, path, name):
+    global data_socket
+    print(path + " " + name)
+    ip_port = pasv()
+    data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    data_socket.connect((ip_port[0], ip_port[1]))
+
+    new_path = ""
+    path = path.split("/")
+
+    print(path)
+
+    for x in range(len(path) - 1):
+        new_path = new_path + path[x] + "/"
+    new_path = new_path + name
+
+    stor(new_path)
+    data_socket.send(data)
+    data_socket.close()
+
+
+# parses arguments and calls the given operation
+def parse_args(arguments):
+    first_arg = arguments[0]
+
+    if first_arg == "ls":
+        real_arguments = urlparse(arguments[1])
+        login(real_arguments.username, real_arguments.password, real_arguments.hostname, real_arguments.port)
+        list(real_arguments.path)
+    if first_arg == "mkdir":
+        real_arguments = urlparse(arguments[1])
+        login(real_arguments.username, real_arguments.password, real_arguments.hostname, real_arguments.port)
+        mkd(real_arguments.path)
+    if first_arg == "rm":
+        real_arguments = urlparse(arguments[1])
+        login(real_arguments.username, real_arguments.password, real_arguments.hostname, real_arguments.port)
+        dele(real_arguments.path)
+    if first_arg == "rmdir":
+        real_arguments = urlparse(arguments[1])
+        login(real_arguments.username, real_arguments.password, real_arguments.hostname, real_arguments.port)
+        rmd(real_arguments.path)
+    if first_arg == "cp":
+        cp(arguments[1], arguments[2])
+    if first_arg == "mv":
+        mv(arguments[1], arguments[2])
+
+
+# calls USER, PASS, TYPE, MODE, AND STRU, setting up the connection for operations
+def login(usr, password, host, port):
+    global control_socket
+
+    if usr == "" or usr is None:
+        usr = 'anonymous'
+    if port is None:
+        port = 21
+
+    control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    control_socket.connect((host, port))
+    print(control_socket.recv(1024).decode())
+    user(usr)
+    passw(password)
+    type("I")
+    stru("F")
+    mode("S")
+
+
+def main(arguments):
+    global control_socket
+    global data_socket
+
+    print(arguments)
+
+    arguments.pop(0)
+
+    parse_args(arguments)
+
+    quit()
+
+
+
+
+
+main(sys.argv)
+# main(["id", "mv", "ftp://koskon:KomBj2bVDOSAsM34hWkX@ftp.3700.network:21/Archive.zip", "/Users/nick/Downloads/pleeposter.png"])
+# main(["id", "mv", "/Users/nick/Downloads/Archive.zip", "ftp://koskon:KomBj2bVDOSAsM34hWkX@ftp.3700.network:21/"])
+# main(["id", "cp", "/Users/nick/Downloads/Archive.zip", "ftp://koskon:KomBj2bVDOSAsM34hWkX@ftp.3700.network:21/"]) # need / at the end of test for directory
+# main(["id", "cp", "ftp://koskon:KomBj2bVDOSAsM34hWkX@ftp.3700.network:21/test/Archive.zip", "/Users/nick/Downloads/Archive.zip"])
